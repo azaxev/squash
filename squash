@@ -1,0 +1,124 @@
+#!/bin/bash
+
+#
+# must does not report correct line#
+#
+
+readonly RED="\e[31m"
+readonly CYAN="\e[36m"
+readonly NORM="\e[39m"
+readonly SETBOLD="\e[1m"
+readonly CLRBOLD="\e[21m"
+
+die() { echo -e "$RED$*\n" >&2 ; exit 1; }
+
+if [ $EUID -ne 0 ]; then die "This utility can be only used by root"; fi
+
+must() {
+	"$@"
+	local err=$?
+	if [ $err -ne 0 ]; then echo -e "$RED${BASH_SOURCE[0]}(${BASH_LINENO[0]}) error: $SETBOLD$@$CLRBOLD$NORM" >$2; exit $err; fi
+}
+
+doSquash() {
+	if [ $# -eq 0 ]; then die "${FUNCNAME[0]} needs directory path"; fi
+	local dir=`readlink -f $1`
+	if [ ! -d $dir ]; then die "$1 is not squashable directory"; fi
+	if mount | grep -q "overlay on $dir"; then die "$1 already squashed"; fi
+	local name=${dir##*/}
+	local parent=${dir%/*}
+	local squash=$parent/.$name.squash
+	local lowerdir=$parent/.$name.base
+	if mount | grep -q "$squash on $lowerdir"; then
+		echo -e "${CYAN}SquashFS already mounted on $lowerdir, using this$NORM"
+	else
+		if [ -f $squash ]; then
+			echo -e "$CYAN$squash already exists, using this$NORM"
+		else
+			echo -e "$CYANCompressing $dir to $squash, this may take some time ...$NORM"
+			must mksquashfs $dir $squash
+		fi
+		must chmod -w $squash
+		must mkdir -p $lowerdir
+		echo -e "${CYAN}Mounting $squash to $lowerdir$NORM"
+		must mount $squash $lowerdir -t squashfs -o loop -o ro
+	fi
+	if [ -d $dir ]; then
+		echo -e "${CYAN}Renaming $dir to $dir.orig$NORM"
+		must mv $dir $dir.orig
+	fi
+	must mkdir -p $dir
+	workdir=/tmp/overlay/$name
+	must mkdir -p $workdir
+	echo -e "${CYAN}Mounting squashed dir $dir$NORM"
+	must mount -t overlay overlay -o lowerdir=$lowerdir,upperdir=$dir,workdir=$workdir $dir
+}
+
+doUmount() {
+	if [ $# -eq 0 ]; then die "${FUNCNAME[0]} needs directory path"; fi
+	local dir=`readlink -f $1`
+	if [ ! -d $dir ]; then die "$1 is not directory"; fi
+	if ! mount | grep -q "overlay on $dir"; then die "$1 not squashed"; fi
+	local name=${dir##*/}
+	local parent=${dir%/*}
+	local squash=$parent/.$name.squash
+	local lowerdir=$parent/.$name.base
+	if [ ! -f $squash ]; then die "$squash not found"; fi
+	if [ ! -d $lowerdir ]; then die "$lowerdir not found"; fi
+	must umount $dir
+	must umount $lowerdir
+	# todo:
+	must rmdir $lowerdir
+	echo -e "${CYAN}Compressing changes into $dir-changes.$NORM"
+	local lastDir=$PWD
+	cd $parent
+	tar -czvf $name-changes.tar.gz $name
+	local err=$?
+	cd $lastDir
+	if [ $err -ne 0 ]; then
+		echo -e "${RED}Could not compress changes, restore $dir manually$NORM"
+	else
+		must rm -rf $dir/*
+		must rmdir $dir
+		must mv $dir.orig $dir
+	fi
+#~ if [ "$(ls -A $dir)" ]; then die "There are changes "
+#~ else
+#~ echo "$dir is empty"
+#~ fi
+}
+
+help() {
+	if [ $# -eq 0 ]; then
+		echo -e "Directory squasher v0.13 2019-01-05, Adam Zakusev\n"
+		echo -e "usage: ${0##*/} <action> [<dir>] [options]\n"
+		echo -e "actions:\n"
+		echo "  h <dir>   this help"
+		echo "  s <dir>   squashes the directory"
+		echo "  r <dir>   re-squash (update) directory"
+		echo "  u <dir>   unmount SquashFS and OverlayFS from the directory"
+		echo -e "\nNOTE: during create/update/restore/umount no other programs should be accessing any files in the squashed dir"
+		echo
+		exit 1
+	fi
+}
+
+readonly arg1=${1/-/}
+
+case $arg1 in
+'h')
+	help
+	;;
+'s')
+	doSquash $2
+	;;
+'r')
+	die "Not yet implemented!"
+	;;
+'u')
+	doUmount $2
+	;;
+*)
+	die "Invalid command line parameter $1, try $SETBOLD${0##*/} -h$CLRBOLD"
+	;;
+esac
